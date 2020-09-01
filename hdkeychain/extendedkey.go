@@ -254,7 +254,9 @@ func (k *ExtendedKey) Child(i uint32) (*ExtendedKey, error) {
 		// When the child is a hardened child, the key is known to be a
 		// private key due to the above early return.  Pad it with a
 		// leading zero as required by [BIP32] for deriving the child.
-		copy(data[1:], k.key)
+		// Additionally, right align it if it's shorter than 32 bytes.
+		offset := 33 - len(k.key)
+		copy(data[offset:], k.key)
 	} else {
 		// Case #2 or #3.
 		// This is either a public or private extended key, but in
@@ -337,6 +339,72 @@ func (k *ExtendedKey) Child(i uint32) (*ExtendedKey, error) {
 
 	// The fingerprint of the parent for the derived child is the first 4
 	// bytes of the RIPEMD160(SHA256(parentPubKey)).
+	parentFP := btcutil.Hash160(k.pubKeyBytes())[:4]
+	return NewExtendedKey(k.version, childKey, childChainCode, parentFP,
+		k.depth+1, i, isPrivate), nil
+}
+
+func (k *ExtendedKey) IsAffectedByIssue172() bool {
+	return len(k.key) < 32
+}
+
+// Deprecated: This is a non-standard derivation that is affected by issue #172.
+// 1-of-256 hardened derivations will be wrong.
+func (k *ExtendedKey) ChildNonStandard(i uint32) (*ExtendedKey, error) {
+	if k.depth == maxUint8 {
+		return nil, ErrDeriveBeyondMaxDepth
+	}
+
+	isChildHardened := i >= HardenedKeyStart
+	if !k.isPrivate && isChildHardened {
+		return nil, ErrDeriveHardFromPublic
+	}
+
+	keyLen := 33
+	data := make([]byte, keyLen+4)
+	if isChildHardened {
+		copy(data[1:], k.key)
+	} else {
+		copy(data, k.pubKeyBytes())
+	}
+	binary.BigEndian.PutUint32(data[keyLen:], i)
+
+	hmac512 := hmac.New(sha512.New, k.chainCode)
+	hmac512.Write(data)
+	ilr := hmac512.Sum(nil)
+
+	il := ilr[:len(ilr)/2]
+	childChainCode := ilr[len(ilr)/2:]
+
+	ilNum := new(big.Int).SetBytes(il)
+	if ilNum.Cmp(btcec.S256().N) >= 0 || ilNum.Sign() == 0 {
+		return nil, ErrInvalidChild
+	}
+
+	var isPrivate bool
+	var childKey []byte
+	if k.isPrivate {
+		keyNum := new(big.Int).SetBytes(k.key)
+		ilNum.Add(ilNum, keyNum)
+		ilNum.Mod(ilNum, btcec.S256().N)
+		childKey = ilNum.Bytes()
+		isPrivate = true
+	} else {
+		ilx, ily := btcec.S256().ScalarBaseMult(il)
+		if ilx.Sign() == 0 || ily.Sign() == 0 {
+			return nil, ErrInvalidChild
+		}
+
+		pubKey, err := btcec.ParsePubKey(k.key, btcec.S256())
+		if err != nil {
+			return nil, err
+		}
+
+		childX, childY := btcec.S256().Add(ilx, ily, pubKey.X, pubKey.Y)
+		pk := btcec.PublicKey{Curve: btcec.S256(), X: childX, Y: childY}
+		childKey = pk.SerializeCompressed()
+	}
+
 	parentFP := btcutil.Hash160(k.pubKeyBytes())[:4]
 	return NewExtendedKey(k.version, childKey, childChainCode, parentFP,
 		k.depth+1, i, isPrivate), nil

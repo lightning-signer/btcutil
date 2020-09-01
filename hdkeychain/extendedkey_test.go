@@ -10,6 +10,7 @@ package hdkeychain
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"math"
@@ -1086,5 +1087,44 @@ func TestMaximumDepth(t *testing.T) {
 	}
 	if noKey != nil {
 		t.Fatal("Child: deriving 256th key should not succeed")
+	}
+}
+
+func TestLeadingZero(t *testing.T) {
+	ii := 399
+	seed := make([]byte, 32)
+	binary.BigEndian.PutUint32(seed[28:], uint32(ii))
+	masterKey, err := NewMaster(seed, &chaincfg.MainNetParams)
+	if err != nil {
+		t.Fatalf("hdkeychain.NewMaster failed: %v", err)
+	}
+	child0, err := masterKey.Child(0 + HardenedKeyStart)
+	if err != nil {
+		t.Fatalf("masterKey.Child failed: %v", err)
+	}
+	child1, err := child0.Child(0 + HardenedKeyStart)
+	if err != nil {
+		t.Fatalf("child0.Child failed: %v", err)
+	}
+	child1nonstandard, err := child0.ChildNonStandard(0 + HardenedKeyStart)
+	if err != nil {
+		t.Fatalf("child0.ChildAccordingToStandard failed: %v", err)
+	}
+
+	// This is the correct result based on BIP32
+	if hex.EncodeToString(child1.key) != "a9b6b30a5b90b56ed48728c73af1d8a7ef1e9cc372ec21afcc1d9bdf269b0988" {
+		t.Error("incorrect standard BIP32 derivation")
+	}
+
+	if hex.EncodeToString(child1nonstandard.key) != "ea46d8f58eb863a2d371a938396af8b0babe85c01920f59a8044412e70e837ee" {
+		t.Error("incorrect btcutil backwards compatible BIP32-like derivation")
+	}
+
+	if !child0.IsAffectedByIssue172() {
+		t.Error("child 0 should be affected by issue 172")
+	}
+
+	if child1.IsAffectedByIssue172() {
+		t.Error("child 1 should not be affected by issue 172")
 	}
 }
